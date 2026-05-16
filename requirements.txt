@@ -1,0 +1,14 @@
+pandas
+numpy
+os
+streamlit 
+langchain-groq
+langchain-core
+langchain-community
+langchain-huggingfae
+python-dotenv
+faiss-cpu
+sentence-transformers
+pypdf
+python-docx
+docx2txt
