@@ -39,6 +39,9 @@ else:
     st.sidebar.success("🔗 API Key is Running...")
 
 with st.sidebar:
+
+    st.header("📂Upload Document")
+
     uploaded_file = st.file_uploader(
         "Upload Documents",
         type=["docx", "pdf", "txt"],
