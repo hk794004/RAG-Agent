@@ -1,16 +1,17 @@
-import streamlit as st
 import os
-import tempfile
+import streamlit as st
 import dotenv
-import json
+import tempfile
 import faiss
 import time
+import json
+import re
 
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_community.chat_message_histories import ChatMessageHistory
 from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader, TextLoader
+from langchain_community.chat_message_histories import ChatMessageHistory
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
@@ -20,150 +21,145 @@ load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 st.set_page_config(page_title="RAG Agent Portal", layout="wide")
-st.title("🤖 AI Powered RAG Agent Read Multiples Document (PDF + Word + TXT)")
-st.caption("Agent Read Documents---->Ask Question----> Get Answers")
+st.title("AI Powered RAG Agent Read Multiples Documents (PDF + Word + Txt)")
+st.caption("Agent Read Documents --> User Ask Question About Document --> And Get Answers")
+
 st.divider()
 
 with st.sidebar:
-
     st.header("⚙️Control")
+    Api_Input = st.text_input("GROQ API KEY", type="password")
 
-    api_input = st.text_input(
-        "GROQ_API_KEY",
-        type="password"
-    )
+API_KEY = Api_Input if Api_Input else GROQ_API_KEY
 
-api_key = api_input if api_input else GROQ_API_KEY
-
-if not api_key:
-    st.error("🔑GROQ API KEY Missing")
+if not API_KEY:
+    raise RuntimeError("GROQ API KEY---is missing")
     st.stop()
 else:
-    st.sidebar.success("🔗 API Connected & Running")
+    st.sidebar.success("🔗 API Key is Running...")
 
 with st.sidebar:
-    
-    pdf_uploader = st.file_uploader(
-        "Upload Document",
-        type=["pdf","docx","txt"],
+    uploaded_file = st.file_uploader(
+        "Upload Documents",
+        type=["docx", "pdf", "txt"],
         accept_multiple_files=True
     )
 
-if not pdf_uploader:
-    st.info("Upload PDFs into the Sidebar")
-    st.stop()
-
 all_docs = []
-temp_path = []
+tmp_path = []
 
-if pdf_uploader:
+if uploaded_file:
 
-    for pdf in pdf_uploader:
-        ext = os.path.splitext(pdf.name)[1].lower()
-
-        temp = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
-        temp.write(pdf.getvalue())
+    for file in uploaded_file:
+        extract = os.path.splitext(file.name)[1].lower()
+        temp = tempfile.NamedTemporaryFile(delete=False, suffix=extract)
+        temp.write(file.getvalue())
         temp.close()
 
-        temp_path.append((temp.name, ext, pdf.name))
+        tmp_path.append((temp.name, extract, file.name))
 
-        if ext==".pdf":
+        if extract == ".pdf":
             loader = PyPDFLoader(temp.name)
-        elif ext==".docx":
+        elif extract == ".docx":
             loader = Docx2txtLoader(temp.name)
-        elif ext==".txt":
+        elif extract == ".txt":
             loader = TextLoader(temp.name)
+        else:
+            continue
 
         docs = loader.load()
 
         for d in docs:
-            d.metadata["source_file"] = pdf.name
+            d.metadata["source_file"] = file.name
 
         all_docs.extend(docs)
 
-    st.sidebar.success(f"Loaded {len(all_docs)} Pages From {len(pdf_uploader)} Document")
+    with st.sidebar:
+        st.success(f"Loaded {len(all_docs)} Pages From {len(uploaded_file)} Document")
 
-    for clean in temp_path:
+    for clean in tmp_path:
         try:
             os.unlink(clean)
-        except Exception as e:
+        except Exception:
             pass
 
-@st.cache_resource
-def get_embediings():
-
-    embeddings = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2",
-        encode_kwargs={"normalize_embeddings" : True}
-    )
-
-    return embeddings
-
-embeddings = get_embediings()
+if not uploaded_file:
+    st.warning("📄 No Document Found")
+    st.stop()
 
 @st.cache_resource
 def get_llm():
 
     llm = ChatGroq(
         model="openai/gpt-oss-120b",
-        api_key=api_key,
-        temperature=0,
-        streaming=False
+        api_key=API_KEY,
+        temperature=0.20,
+        streaming=True
     )
 
     return llm
 
-@st.cache_resource
-def chunks():
+LLM = get_llm()
 
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1200,
-        chunk_overlap=120
+@st.cache_resource
+
+def get_embeddings():
+    embeddings = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2",
+        encode_kwargs={"normalize_embeddings": True}
     )
 
-    return text_splitter
+    return embeddings
 
-Text_Splitters = chunks()
+embeddings = get_embeddings()
+
+@st.cache_resource
+def get_chunks():
+
+    text_splitters = RecursiveCharacterTextSplitter(
+        chunk_size=1200,
+        chunk_overlap=100
+    )
+
+    return text_splitters
+
+Text_Splitters = get_chunks()
 
 Split = Text_Splitters.split_documents(all_docs)
 
-vectorstore = FAISS.from_documents(
-    Split,
-    embeddings
-)
+vectorstore = FAISS.from_documents(Split, embeddings)
 
-retreiver = vectorstore.as_retriever(
+retriever = vectorstore.as_retriever(
     search_type="mmr",
-    search_kwargs={"k" : 5, "fetch_k" : 20}
+    search_kwargs={"k": 5, "fetch_k": 20}
 )
 
-st.sidebar.info(f"🔍 indexed {len(Split)} Chunks for Retreived")
-
+with st.sidebar:
+    st.info(f"🔎 Indexed {len(Split)} Chunks For Retreived")
+    
 def _join_docs(docs, max_chars=7000):
     chunk, total = [], 0
-                                                    
-    for d in docs:
-        piece = d.page_content
-        if total + len(piece) > max_chars:
+    for doc in docs:
+        text = doc.page_content.strip()
+        if not text:
+            continue
+        if total + len(text) > max_chars:
             break
-        chunk.append(piece)
-        total += len(piece)
-    return "\n\n---\n\n".join(chunk)
+        source = doc.metadata.get('source_file', 'Unknown File')
+        page   = doc.metadata.get('page', '?')
+        header = f"[File: {source} | Page: {page}]\n"
+        chunk.append(header + text)
+        total += len(text)
+    return "\n\n".join(chunk)
 
-contextualize_q_prompt = ChatPromptTemplate.from_messages([
+
+contextualize_prompt = ChatPromptTemplate.from_messages([
 
     ("system",
-     "You are an expert assistant that rewrites user questions into standalone questions for document retrieval.\n"
-     "Your job is to use the chat history ONLY if needed to understand context.\n\n"
-     
-     "Rules:\n"
-     "- Convert the user's question into a clear, self-contained question\n"
-     "- Do NOT answer the question\n"
-     "- Do NOT add explanations\n"
-     "- Do NOT assume missing facts not in chat history\n"
-     "- Keep it short and precise\n"
-     "- The output must be only the rewritten question"
-    ),
+     "You are a query reformulation engine for a strict document-only RAG system.\n"
+     "Rewrite the user's question into a clean standalone search query using chat history.\n"
+     "Resolve pronouns, merge follow-ups, remove filler words.\n"
+     "Output ONLY the reformulated query. Nothing else."),
     MessagesPlaceholder("chat_history"),
     ("human", "{input}")
 
@@ -172,27 +168,45 @@ contextualize_q_prompt = ChatPromptTemplate.from_messages([
 qa_prompt = ChatPromptTemplate.from_messages([
 
     ("system",
-     "You are an expert AI assistant specialized in analyzing documents.\n\n"
+     "You are a STRICT document-only assistant.\n"
+     "You ONLY answer from the provided document context.\n"
+     "Zero external knowledge. Zero guessing. Zero hallucination.\n\n"
 
-     "Your role:\n"
-     "- Answer ONLY using the given context from the document\n"
-     "- Do NOT use outside knowledge\n"
-     "- If the answer is NOT in the context, do NOT say 'not available'\n"
-     "  Instead: Suggest 2-3 related topics or stories that ARE present in the document\n"
-     "  Format:\n"
-     "  'This topic is not in the document, but here are related things I found:\n"
-     "   • [suggestion 1]\n"
-     "   • [suggestion 2]'\n\n"
+     "FIRST: Check if the answer exists in the context.\n\n"
 
-     "- Never hallucinate\n"
-     "- Always stay within document content only"
-    ),
+     "If NOT found — write this one line only, then stop completely:\n"
+     "📄 Out of Scope --- context not provided in the document\n\n"
+
+     "If FOUND — write ONE response using EXACTLY this order. Each section appears once only:\n\n"
+
+     "### 📝 Summary\n"
+     "Write 3 to 5 clear lines summarizing what the document says about this topic.\n"
+     "Keep it simple and easy to understand at a glance.\n\n"
+
+     "### 💡  Answer\n"
+     "Write a direct and concise answer in 2 to 4 lines from the document only.\n\n"
+
+     "### 📖 Explanation\n"
+     "Write a deep and detailed explanation using only the document context.\n"
+     "Break it down step by step. Be thorough so the reader fully understands.\n"
+     "Use bullet points or sub-sections where needed for clarity.\n\n"
+
+     "### 🔑 Key Points\n"
+     "Write 3 to 5 important bullet points taken directly from the document.\n\n"
+
+     "### 📄 Source\n"
+     "Write the exact file name and page number from the (File: ... | Page: ...) tags in the context.\n\n"
+
+     "STRICT RULES:\n"
+     "Write each section exactly once. Never repeat a section.\n"
+     "Never add anything outside these 6 sections.\n"
+     "Never use outside knowledge. Only the document context."),
 
     ("human",
-     "Context from document:\n{context}\n\n"
-     "Question:\n{input}")
-
+     "## Document Context:\n{context}\n\n"
+     "## Question:\n{input}")
 ])
+
 
 if "chat_history" not in st.session_state:
     st.session_state["chat_history"] = {}
@@ -205,39 +219,94 @@ def get_history(session_id):
     return chat_history[session_id]
 
 Session_ID = "default"
-
 history = get_history(Session_ID)
+
+def extract_suggestions(text):
+    match = re.search(
+        r'💡 Suggested Questions?\s*\n(.*?)(?=###|$)',
+        text, re.DOTALL
+    )
+    if not match:
+        return []
+    block = match.group(1)
+    return re.findall(r'-\s+(.+\?)', block)
 
 for msg in history.messages:
     role = getattr(msg, "type", "")
 
-    if role=="human":
+    if role == "human":
         st.chat_message("human").write(msg.content)
     else:
         st.chat_message("assistant").write(msg.content)
 
-User_Input = st.chat_input("💬 Ask a Question...")
+if st.session_state.get("last_suggestions"):
+    suggestions = st.session_state["last_suggestions"]
+
+    st.markdown(
+        """
+        <style>
+        .sugg-btn-container div[data-testid="column"] .stButton button {
+            width: 100%;
+            background-color: transparent;
+            border: 1px solid rgba(150,150,150,0.35);
+            border-radius: 12px;
+            padding: 12px 16px;
+            text-align: left;
+            color: inherit;
+            font-size: 13.5px;
+            line-height: 1.5;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            white-space: normal;
+        }
+        .sugg-btn-container div[data-testid="column"] .stButton button:hover {
+            background-color: rgba(150,150,150,0.1);
+            border-color: rgba(150,150,150,0.7);
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
+    st.markdown("**💡 Suggested **")
+
+    num_cols = min(len(suggestions), 3)
+    cols = st.columns(num_cols)
+
+    st.markdown('<div class="sugg-btn-container">', unsafe_allow_html=True)
+    for i, q in enumerate(suggestions):
+        with cols[i % num_cols]:
+            if st.button(f"🔍 {q}", key=f"sugg_{i}_{hash(q)}"):
+                st.session_state["suggested_input"] = q
+                st.session_state["last_suggestions"] = []
+                st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
+
+chat_input = st.chat_input("💬 Ask a Question...")
+
+if "suggested_input" in st.session_state:
+    User_Input = st.session_state.pop("suggested_input")
+elif chat_input:
+    User_Input = chat_input
+else:
+    User_Input = None
 
 if User_Input:
     st.chat_message("human").write(User_Input)
 
-    rewrite_msgs = contextualize_q_prompt.format_messages(
-        chat_history=history.messages, 
+    rewrite_msgs = contextualize_prompt.format_messages(
+        chat_history=history.messages,
         input=User_Input,
     )
 
-    LLM = get_llm()
-
     standalone_q = LLM.invoke(rewrite_msgs).content.strip()
 
-    docs = retreiver.invoke(standalone_q)
+    docs = retriever.invoke(standalone_q)
 
     if not docs:
-        answer = "Out of Scope -- Context is not found in the provided documents."
-        
+        answer = "📄 Out of Scope --- context not provided in the document"
         with st.chat_message("assistant"):
             st.write(answer)
-
         history.add_user_message(User_Input)
         history.add_ai_message(answer)
         st.stop()
@@ -249,64 +318,55 @@ if User_Input:
         context=context_str,
     )
 
-    answer = LLM.invoke(qa_msgs).content
+    collected = []
+
+    def stream_once():
+        for chunk in LLM.stream(qa_msgs):
+            for char in chunk.content:
+                collected.append(char)
+                yield char
+                time.sleep(0.005)
 
     with st.chat_message("assistant"):
-        st.markdown(answer)
+        st.write_stream(stream_once())
+
+    answer = "".join(collected)
 
     history.add_user_message(User_Input)
     history.add_ai_message(answer)
 
-    with st.expander("🔍 Debug : Rewritten Query & Retrieval"):
+    sugg_prompt = f"""Based on this document answer, generate exactly 2 short follow-up questions.
+    Output ONLY in this format, nothing else:
+    - Question one?
+    - Question two?
+
+    Answer context:
+    {answer[:1500]}"""
+
+    sugg_response = LLM.invoke(sugg_prompt).content.strip()
+    suggestions = re.findall(r'-\s+(.+\?)', sugg_response)
+    st.session_state["last_suggestions"] = suggestions[:3]
+
+    with st.expander("🔎 Debug : Rewritten Query & Retrieval"):
 
         st.write("**Rewritten (standalone) query:**")
         st.code(standalone_q or "(empty)", language="text")
         st.write(f"**Retrieved {len(docs)} chunk(s).**")
 
     with st.expander("📄 Retrieved Chunks"):
-
+        
         for i, doc in enumerate(docs, 1):
             st.markdown(f"**{i}. {doc.metadata.get('source_file','Unknown')} (p {doc.metadata.get('page','?')})**")
             st.write(doc.page_content[:500] + ("..." if len(doc.page_content) > 500 else ""))
 
+    st.rerun()
+
 with st.sidebar:
-
-    col1,col2 = st.columns(2)
-
+    col1, col2 = st.columns(2)
     with col1:
         Chat = st.button("Clear Chat")
 
 if Chat:
     st.session_state.pop("chat_history", None)
+    st.session_state.pop("last_suggestions", None)
     st.rerun()
-
-export_data = []
-
-for message in history.messages:
-    role = getattr(message, "type", "")
-
-    if role=="human":
-        export_data.append({"role" : "human", "message" : message.content})
-    else:
-        export_data.append({"role" : "assistant", "message" : message.content})
-
-
-json_data = json.dumps(export_data, ensure_ascii=False, indent=2)
-
-with st.sidebar:
-
-    with col2:
-
-        download_button = st.download_button(
-            "Chat_History",
-            data=json_data,
-            file_name="chat_history.json"
-        )
-
-
-
-
-
-
-
-   
