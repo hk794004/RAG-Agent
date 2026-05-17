@@ -1,11 +1,10 @@
 import streamlit as st
-import pandas as pd
-import numpy as np
 import os
 import tempfile
 import dotenv
 import json
 import faiss
+import time
 
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
@@ -15,13 +14,14 @@ from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader, Te
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
+
 load_dotenv()
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 st.set_page_config(page_title="RAG Agent Portal", layout="wide")
-st.title("🤖 AI Powered RAG Agent Read Multiples PDF Document")
-st.caption("Agent Read PDF Document---->Ask Question about PDF----> Get Ansawers")
+st.title("🤖 AI Powered RAG Agent Read Multiples Document (PDF + Word + TXT)")
+st.caption("Agent Read Documents---->Ask Question----> Get Answers")
 st.divider()
 
 with st.sidebar:
@@ -44,7 +44,7 @@ else:
 with st.sidebar:
     
     pdf_uploader = st.file_uploader(
-        "Upload PDFs",
+        "Upload Document",
         type=["pdf","docx","txt"],
         accept_multiple_files=True
     )
@@ -67,25 +67,21 @@ if pdf_uploader:
 
         temp_path.append((temp.name, ext, pdf.name))
 
-    for path, ext, original_name in temp_path:
-
         if ext==".pdf":
-            loader = PyPDFLoader(path)
+            loader = PyPDFLoader(temp.name)
         elif ext==".docx":
-            loader = Docx2txtLoader(path)
+            loader = Docx2txtLoader(temp.name)
         elif ext==".txt":
-            loader = TextLoader(path)
-        else:
-            continue
+            loader = TextLoader(temp.name)
 
         docs = loader.load()
 
         for d in docs:
-            d.metadata["source_file"] = original_name
+            d.metadata["source_file"] = pdf.name
 
         all_docs.extend(docs)
 
-    st.sidebar.success(f"Loaded {len(all_docs)} Pages From {len(pdf_uploader)} PDFs")
+    st.sidebar.success(f"Loaded {len(all_docs)} Pages From {len(pdf_uploader)} Document")
 
     for clean in temp_path:
         try:
@@ -237,7 +233,7 @@ if User_Input:
     docs = retreiver.invoke(standalone_q)
 
     if not docs:
-        answer = "Out of Scope -- not found in provided documents."
+        answer = "Out of Scope -- Context is not found in the provided documents."
         
         with st.chat_message("assistant"):
             st.write(answer)
@@ -301,11 +297,10 @@ with st.sidebar:
 
     with col2:
 
-        st.download_button(
+        download_button = st.download_button(
             "Chat_History",
             data=json_data,
             file_name="chat_history.json"
-            
         )
 
 
