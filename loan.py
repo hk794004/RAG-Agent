@@ -321,6 +321,86 @@ hr {
     border-color: #ede9ff !important;
     margin: 0.8rem 0 !important;
 }
+
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   SUGGESTED QUESTIONS — pill buttons outside chat
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+
+.suggest-wrapper {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 14px 4px 6px 4px;
+}
+
+.suggest-label {
+    font-family: 'Plus Jakarta Sans', sans-serif;
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: #9b92cc;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    margin-bottom: 2px;
+}
+
+.suggest-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 9px;
+    background: #faf8ff;
+    border: 1.5px solid #ddd6ff;
+    border-radius: 50px;
+    padding: 9px 18px 9px 14px;
+    font-family: 'Plus Jakarta Sans', sans-serif;
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: #4a3fbf;
+    cursor: pointer;
+    transition: all 0.18s ease;
+    text-decoration: none;
+    width: fit-content;
+    max-width: 100%;
+    box-shadow: 0 1px 6px rgba(91, 79, 207, 0.07);
+    white-space: normal;
+    word-break: break-word;
+}
+
+.suggest-pill:hover {
+    background: linear-gradient(135deg, #7c6ee6 0%, #9d8bf4 100%);
+    color: #ffffff;
+    border-color: transparent;
+    box-shadow: 0 4px 16px rgba(124, 110, 230, 0.30);
+    transform: translateY(-1px);
+}
+
+.suggest-pill .bulb {
+    font-size: 1.05rem;
+    flex-shrink: 0;
+    filter: drop-shadow(0 1px 2px rgba(124,110,230,0.18));
+}
+
+/* Override default Streamlit button inside suggestion area */
+.suggest-btn-area .stButton > button {
+    background: #faf8ff !important;
+    color: #4a3fbf !important;
+    border: 1.5px solid #ddd6ff !important;
+    border-radius: 50px !important;
+    font-weight: 500 !important;
+    font-size: 0.875rem !important;
+    padding: 9px 20px !important;
+    width: 100% !important;
+    text-align: left !important;
+    justify-content: flex-start !important;
+    box-shadow: 0 1px 6px rgba(91, 79, 207, 0.07) !important;
+    transition: all 0.18s ease !important;
+}
+.suggest-btn-area .stButton > button:hover {
+    background: linear-gradient(135deg, #7c6ee6 0%, #9d8bf4 100%) !important;
+    color: #ffffff !important;
+    border-color: transparent !important;
+    box-shadow: 0 4px 16px rgba(124, 110, 230, 0.30) !important;
+    transform: translateY(-1px) !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -393,9 +473,8 @@ def get_llm():
     return ChatGroq(
         model="openai/gpt-oss-120b",
         api_key=api_key,
-        temperature=0,
+        temperature=0.10,
     )
-
 
 @st.cache_resource
 def get_embeddings():
@@ -404,16 +483,21 @@ def get_embeddings():
         encode_kwargs={"normalize_embeddings": True}
     )
 
+embeddings    = get_embeddings()
 
 @st.cache_resource
 def get_splitters():
     return RecursiveCharacterTextSplitter(chunk_size=1200, chunk_overlap=100)
 
-
-embeddings    = get_embeddings()
 text_splitters = get_splitters()
-Split         = text_splitters.split_documents(all_docs)
-vectorstore   = FAISS.from_documents(Split, embeddings)
+
+Split = text_splitters.split_documents(all_docs)
+
+vectorstore   = FAISS.from_documents(
+    Split,
+    embeddings
+)
+
 retreiver     = vectorstore.as_retriever(
     search_type="mmr",
     search_kwargs={"k": 5, "fetch_k": 20}
@@ -422,8 +506,7 @@ retreiver     = vectorstore.as_retriever(
 with st.sidebar:
     st.info(f"🔍 Indexed {len(Split)} Chunks For Retrieval")
 
-
-def _join_docs(docs, max_chars=8000):
+def _join_docs(docs, max_chars=7000):
     chunk, total = [], 0
     for doc in docs:
         text = doc.page_content.strip()
@@ -435,50 +518,140 @@ def _join_docs(docs, max_chars=8000):
         total += len(text)
     return "\n\n".join(chunk)
 
+context_prompt = """
+You are a query contextualization assistant for a RAG system.
+
+Your ONLY job is to convert the user's latest message into a clear, standalone, retrieval-optimized search query using conversation history.
+
+RULES:
+- Do NOT answer the question.
+- Do NOT explain anything.
+- Only output the refined standalone query.
+- Resolve references like "it", "they", "that", "those", "its pricing", "tell me more" using previous conversation context.
+- If the message is a greeting (e.g. "Salam", "Hello", "Hi"), return it exactly as-is.
+- Keep the query concise but information-rich for vector retrieval.
+- Do not add external knowledge or invent details.
+- Maintain the same language as the user's query.
+
+EXAMPLES:
+
+Conversation:
+User: Tell me about GPT-4 Turbo
+User: What about pricing?
+Output: "What is the pricing of GPT-4 Turbo?"
+
+Conversation:
+User: Explain the leave policy
+User: What are the eligibility rules?
+Output: "What are the eligibility rules in the leave policy?"
+
+FINAL INSTRUCTION:
+Generate ONLY the standalone retrieval-ready query. No extra text.
+"""
+
 
 qa_prompt = """
-Context:
+You are a Personal Document RAG Assistant. You ONLY answer from uploaded documents.
+
+══════════════════════════════════════
+GREETING RULE
+══════════════════════════════════════
+When user greets you (Salam / Hello / Hi / How are you / Hey):
+Reply in EXACTLY this format — nothing more, nothing less:
+
+**W.Salam! I am fine, thanks for asking I am here to help you with a Document related Question.**
+**I am your Personal Assistant — Please Feel Free to Ask me Anything about Your Document!** 📄
+
+══════════════════════════════════════
+TOPIC LISTING RULE
+══════════════════════════════════════
+When user asks about key topics, important areas, or what is covered in the PDF:
+Reply in EXACTLY this format:
+
+Yes! I will provide the Topics related to your Question.
+Here are some **Key Topics** found in the provided Document:
+
+**Answer 1:** <Topic or Answer>
+📄 Page No: <X>
+
+**Answer 2:** <Topic or Answer>
+📄 Page No: <X>
+
+**Answer 3:** <Topic or Answer>
+📄 Page No: <X>
+
+*(continue for all available topics from retrieved context)*
+
+══════════════════════════════════════
+OUTSIDE KNOWLEDGE RULE — STRICT
+══════════════════════════════════════
+If the user asks ANYTHING if it,s not Available in the uploaded documents
+(e.g. "What is AI?", "Tell me about Pakistan", general knowledge questions):
+
+Reply in EXACTLY this format:
+
+"Soory, I cannot provide information from outside sources.
+I am your **Personal Document RAG Assistant** — I am only here to help you
+with your uploaded documents. Please feel free to ask anything related to your document! 😊"
+
+══════════════════════════════════════
+GENERAL ANSWER RULE
+══════════════════════════════════════
+For all other document-based questions:
+
+- Give a direct, clear answer from the document context.
+- Use bullet points where helpful.
+- Always include source at the end:
+
+📄 **Source:**
+- **File Name:** <document_name>
+- **Page Number(s):** <page_numbers>
+
+══════════════════════════════════════
+STRICT RULES
+══════════════════════════════════════
+
+- NEVER hallucinate facts, names, page numbers, or summaries.
+- NEVER use outside knowledge or information not available in the retrieved document context.
+- NEVER fabricate facts, names, page numbers, or sources.
+- NEVER assume missing information.
+- Avoid phrases like: "Generally", "Usually", "In real world", "According to common knowledge".
+
+- ONLY use the retrieved document context as the source of truth.
+- You ARE allowed to:
+  - summarize document content
+  - explain concepts from the document
+  - extract key points and topics
+  - rephrase and simplify information
+  - combine multiple relevant document chunks for better understanding
+
+- If the answer is not found in the document context, clearly say:
+  "This information is not available in the provided documents."
+
+══════════════════════════════════════
+DOCUMENT CONTEXT:
 {context}
 
-Question:
+USER QUESTION:
 {question}
-
-Instructions:
-- Answer ONLY from the given context.
-- Do not use external knowledge.
-- If context contains the answer:
-    Start with:
-    📄 Context Founded in the provided document
-
-    Then write:
-    💡 **Answer**
-
-    Then provide a professional, clear, slightly detailed answer.
-
-    End with:
-
-    📄 Source
-
-    file_name : {file_name}
-    Page_No : {page_number}
-
-- If context does not contain the answer:
-    Return ONLY:
-
-    📄 Out of Scope --- Context Not Found in the Provided Document
+══════════════════════════════════════
 """
 
 if "chat_history" not in st.session_state:
     st.session_state["chat_history"] = {}
 
-chat_history = st.session_state["chat_history"]
+if "suggested_questions" not in st.session_state:
+    st.session_state["suggested_questions"] = []
 
+if "pending_question" not in st.session_state:
+    st.session_state["pending_question"] = None
+
+chat_history = st.session_state["chat_history"]
 
 def get_history(session_id):
     if session_id not in chat_history:
         chat_history[session_id] = ChatMessageHistory()
     return chat_history[session_id]
-
 
 Session_ID = "default"
 history    = get_history(Session_ID)
@@ -490,14 +663,106 @@ for message in history.messages:
     else:
         st.chat_message("assistant").write(message.content)
 
-user_input = st.chat_input("💬 Ask A Question...")
+def generate_suggestions(retrieved_docs, standalone_query):
+    if not retrieved_docs:
+        return [
+            "What are the main topics in this document?",
+            "Can you summarize this document?"
+        ]
+
+    text = " ".join([d.page_content for d in retrieved_docs[:2]])[:2000]
+
+    llm = get_llm()
+
+    suggestion_prompt = f"""
+You are a smart assistant that generates 2 short follow-up questions.
+
+Based ONLY on the document context below and user query,
+generate 2 helpful and relevant questions the user might ask next.
+
+RULES:
+- Only output 2 questions
+- No explanations
+- No numbering text
+- Keep it simple and clear
+
+USER QUERY:
+{standalone_query}
+
+DOCUMENT CONTEXT:
+{text}
+
+OUTPUT FORMAT:
+1. ...
+2. ...
+"""
+    res = llm.invoke(suggestion_prompt).content.strip().split("\n")
+
+    cleaned = []
+    for r in res:
+        r = r.strip("- ").strip()
+        if r:
+            cleaned.append(r)
+
+    return cleaned[:2] if len(cleaned) >= 2 else [
+        "Can you explain this topic in detail?",
+        "What are the key points in this section?"
+    ]
+
+suggestions = st.session_state["suggested_questions"]
+
+if suggestions:
+    st.markdown("***💡 Suggested Questions***", unsafe_allow_html=True)
+
+    with st.container():
+        st.markdown('<div class="suggest-btn-area">', unsafe_allow_html=True)
+
+        col_a, col_b = st.columns(2)
+
+        with col_a:
+            q1_text = suggestions[0] if len(suggestions) > 0 else ""
+            if q1_text:
+                label_a = f" {q1_text}"
+                if st.button(label_a, key="sq_0", use_container_width=True):
+                    st.session_state["pending_question"] = q1_text
+                    st.rerun()
+
+        with col_b:
+            q2_text = suggestions[1] if len(suggestions) > 1 else ""
+            if q2_text:
+                label_b = f" {q2_text}"
+                if st.button(label_b, key="sq_1", use_container_width=True):
+                    st.session_state["pending_question"] = q2_text
+                    st.rerun()
+
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+pending = st.session_state.pop("pending_question", None)
+
+user_input = st.chat_input("💬 Ask A Question...") or pending
 
 if user_input:
     st.chat_message("human").write(user_input)
 
-    retrieved_docs  = retreiver.invoke(user_input)
-    standalone_query = user_input.strip()
-    context         = _join_docs(retrieved_docs)
+    history_text = ""
+    for message in history.messages:
+        role = "User" if getattr(message, "type", "") == "human" else "Assistant"
+        history_text += f"{role}: {message.content}\n"
+
+    contextualization_prompt = f"""{context_prompt}
+
+Conversation History:
+{history_text}
+Latest User Message: {user_input}
+"""
+    llm              = get_llm()
+    rewritten        = llm.invoke(contextualization_prompt)
+    standalone_query = rewritten.content.strip().strip('"')
+
+    retrieved_docs = retreiver.invoke(standalone_query)
+    context        = _join_docs(retrieved_docs)
 
     top_doc     = retrieved_docs[0] if retrieved_docs else None
     file_name   = top_doc.metadata.get("source_file", "Unknown") if top_doc else "Unknown"
@@ -505,12 +770,11 @@ if user_input:
 
     final_prompt = qa_prompt.format(
         context=context,
-        question=user_input,
+        question=standalone_query,
         file_name=file_name,
         page_number=page_number
     )
 
-    llm      = get_llm()
     response = llm.invoke(final_prompt)
     answer   = response.content
 
@@ -525,8 +789,12 @@ if user_input:
             placeholder.markdown(typed)
             time.sleep(0.005)
 
+    new_suggestions = generate_suggestions(retrieved_docs, standalone_query)
+    st.session_state["suggested_questions"] = new_suggestions[:2]
+
     with st.expander("🔎 Debug : Rewritten Query & Retrieval"):
-        st.info(f"**Query Sent to LLM : ** {standalone_query}")
+        st.info(f"**Original Query:** {user_input}")
+        st.success(f"**Rewritten Standalone Query:** {standalone_query}")
 
     with st.expander("📄 Retrieved Chunks"):
         for i, doc in enumerate(retrieved_docs):
@@ -536,7 +804,11 @@ if user_input:
             st.text(doc.page_content[:500])
             st.divider()
 
+    st.rerun()
+
 with st.sidebar:
     if st.button("🧹 Clear Chat"):
         st.session_state.pop("chat_history", None)
+        st.session_state["suggested_questions"] = []
+        st.session_state["pending_question"] = None
         st.rerun()
