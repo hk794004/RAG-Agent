@@ -473,7 +473,7 @@ def get_llm():
     return ChatGroq(
         model="openai/gpt-oss-120b",
         api_key=api_key,
-        temperature=0.10,
+        temperature=0,
     )
 
 @st.cache_resource
@@ -487,7 +487,13 @@ embeddings    = get_embeddings()
 
 @st.cache_resource
 def get_splitters():
-    return RecursiveCharacterTextSplitter(chunk_size=1200, chunk_overlap=100)
+
+    splitters = RecursiveCharacterTextSplitter(
+        chunk_size=1200,
+        chunk_overlap=120
+    )
+
+    return splitters
 
 text_splitters = get_splitters()
 
@@ -518,124 +524,68 @@ def _join_docs(docs, max_chars=7000):
         total += len(text)
     return "\n\n".join(chunk)
 
-context_prompt = """
-You are a query contextualization assistant for a RAG system.
+Context_Prompt = ChatPromptTemplate.from_messages([
 
-Your ONLY job is to convert the user's latest message into a clear, standalone, retrieval-optimized search query using conversation history.
+    ("system",
+     "You are a query reformulation engine for a strict document-only RAG system.\n"
+     "Rewrite the user's question into a clean standalone search query using chat history.\n"
+     "Resolve pronouns, merge follow-ups, remove filler words.\n"
+     "Output ONLY the reformulated query. Nothing else."),
+    MessagesPlaceholder("chat_history"),
+    ("human", "{input}")
 
-RULES:
-- Do NOT answer the question.
-- Do NOT explain anything.
-- Only output the refined standalone query.
-- Resolve references like "it", "they", "that", "those", "its pricing", "tell me more" using previous conversation context.
-- If the message is a greeting (e.g. "Salam", "Hello", "Hi"), return it exactly as-is.
-- Keep the query concise but information-rich for vector retrieval.
-- Do not add external knowledge or invent details.
-- Maintain the same language as the user's query.
+])
 
-EXAMPLES:
+qa_prompt = ChatPromptTemplate.from_messages([
 
-Conversation:
-User: Tell me about GPT-4 Turbo
-User: What about pricing?
-Output: "What is the pricing of GPT-4 Turbo?"
+    ("system",
+     "You are a Strict RAG Assistant You Only Ansawer The Provided Document:\n\n"
 
-Conversation:
-User: Explain the leave policy
-User: What are the eligibility rules?
-Output: "What are the eligibility rules in the leave policy?"
+     "═══════════════════════════════════════════════\n"
+     "MODE 1 — CASUAL CHAT (greetings, small talk, off-topic)\n"
+     "═══════════════════════════════════════════════\n"
+     "If the user says hi, hello, salam, how are you, thanks, jokes,\n"
+     "or anything NOT related to document research:\n"
+     "→ Reply warmly and naturally like a friendly assistant.\n"
+     "→ Be witty, kind, and conversational.\n"
+     "→ At the end, gently mention you can help with their documents.\n"
+     "→ No headers. No sections. Just plain friendly text.\n\n"
 
-FINAL INSTRUCTION:
-Generate ONLY the standalone retrieval-ready query. No extra text.
-"""
+     "═══════════════════════════════════════════════\n"
+     "MODE 2 — DOCUMENT Q&A (questions about uploaded documents)\n"
+     "═══════════════════════════════════════════════\n"
+     "Supported formats: PDF, TXT, DOCX\n"
+     "Zero external knowledge. Zero guessing. Zero hallucination.\n\n"
 
+     "FIRST: Check if the answer exists in the context.\n\n"
 
-qa_prompt = """
-You are a Personal Document RAG Assistant. You ONLY answer from uploaded documents.
+     "If NOT found — reply casually like:\n"
+     "'Hmm, I couldn't find that in your document. Maybe try rephrasing? 🤔'\n\n"
 
-══════════════════════════════════════
-GREETING RULE
-══════════════════════════════════════
-When user greets you (Salam / Hello / Hi / How are you / Hey):
-Reply in EXACTLY this format — nothing more, nothing less:
+     "If FOUND — write the response in exactly this format:\n\n"
 
-**W.Salam! I am fine, thanks for asking I am here to help you with a Document related Question.**
-**I am your Personal Assistant — Please Feel Free to Ask me Anything about Your Document!** 📄
+     "[Your clean flowing paragraph answer here. No headings. No icons. No bullet points.\n"
+     "Just clear, natural, well-written paragraph(s) from the document context only.\n"
+     "Be thorough but readable.]\n\n"
 
-══════════════════════════════════════
-TOPIC LISTING RULE
-══════════════════════════════════════
-When user asks about key topics, important areas, or what is covered in the PDF:
-Reply in EXACTLY this format:
+     "---\n"
+     "📄 Source\n"
+     "File : [exact file name from context]\n"
+     "Page : [exact page number from context]\n\n"
 
-Yes! I will provide the Topics related to your Question.
-Here are some **Key Topics** found in the provided Document:
+    "STRICT RULES:\n"
+    "NEVER use ###, icons, or section titles inside the answer.\n"
+    "The separator --- and Source block must always appear at the very end.\n"
+    "File and Page must each be on their own separate line.\n"
+    "STRICTLY answer from context only.\n"
+    "Do not infer.\m"
+    "Do not suggest document structure.\n"
+    "Never use outside knowledge. Only the document context."),
 
-**Answer 1:** <Topic or Answer>
-📄 Page No: <X>
-
-**Answer 2:** <Topic or Answer>
-📄 Page No: <X>
-
-**Answer 3:** <Topic or Answer>
-📄 Page No: <X>
-
-*(continue for all available topics from retrieved context)*
-
-══════════════════════════════════════
-OUTSIDE KNOWLEDGE RULE — STRICT
-══════════════════════════════════════
-If the user asks ANYTHING if it,s not Available in the uploaded documents
-(e.g. "What is AI?", "Tell me about Pakistan", general knowledge questions):
-
-Reply in EXACTLY this format:
-
-"Soory, I cannot provide information from outside sources.
-I am your **Personal Document RAG Assistant** — I am only here to help you
-with your uploaded documents. Please feel free to ask anything related to your document! 😊"
-
-══════════════════════════════════════
-GENERAL ANSWER RULE
-══════════════════════════════════════
-For all other document-based questions:
-
-- Give a direct, clear answer from the document context.
-- Use bullet points where helpful.
-- Always include source at the end:
-
-📄 **Source:**
-- **File Name:** <document_name>
-- **Page Number(s):** <page_numbers>
-
-══════════════════════════════════════
-STRICT RULES
-══════════════════════════════════════
-
-- NEVER hallucinate facts, names, page numbers, or summaries.
-- NEVER use outside knowledge or information not available in the retrieved document context.
-- NEVER fabricate facts, names, page numbers, or sources.
-- NEVER assume missing information.
-- Avoid phrases like: "Generally", "Usually", "In real world", "According to common knowledge".
-
-- ONLY use the retrieved document context as the source of truth.
-- You ARE allowed to:
-  - summarize document content
-  - explain concepts from the document
-  - extract key points and topics
-  - rephrase and simplify information
-  - combine multiple relevant document chunks for better understanding
-
-- If the answer is not found in the document context, clearly say:
-  "This information is not available in the provided documents."
-
-══════════════════════════════════════
-DOCUMENT CONTEXT:
-{context}
-
-USER QUESTION:
-{question}
-══════════════════════════════════════
-"""
+    ("human",
+     "## Document Context:\n{context}\n\n"
+     "## Question:\n{input}")
+])
 
 if "chat_history" not in st.session_state:
     st.session_state["chat_history"] = {}
@@ -671,8 +621,7 @@ def generate_suggestions(retrieved_docs, standalone_query):
         ]
 
     text = " ".join([d.page_content for d in retrieved_docs[:2]])[:2000]
-
-    llm = get_llm()
+    llm  = get_llm()
 
     suggestion_prompt = f"""
 You are a smart assistant that generates 2 short follow-up questions.
@@ -696,8 +645,7 @@ OUTPUT FORMAT:
 1. ...
 2. ...
 """
-    res = llm.invoke(suggestion_prompt).content.strip().split("\n")
-
+    res     = llm.invoke(suggestion_prompt).content.strip().split("\n")
     cleaned = []
     for r in res:
         r = r.strip("- ").strip()
@@ -716,22 +664,19 @@ if suggestions:
 
     with st.container():
         st.markdown('<div class="suggest-btn-area">', unsafe_allow_html=True)
-
         col_a, col_b = st.columns(2)
 
         with col_a:
             q1_text = suggestions[0] if len(suggestions) > 0 else ""
             if q1_text:
-                label_a = f" {q1_text}"
-                if st.button(label_a, key="sq_0", use_container_width=True):
+                if st.button(f" {q1_text}", key="sq_0", use_container_width=True):
                     st.session_state["pending_question"] = q1_text
                     st.rerun()
 
         with col_b:
             q2_text = suggestions[1] if len(suggestions) > 1 else ""
             if q2_text:
-                label_b = f" {q2_text}"
-                if st.button(label_b, key="sq_1", use_container_width=True):
+                if st.button(f" {q2_text}", key="sq_1", use_container_width=True):
                     st.session_state["pending_question"] = q2_text
                     st.rerun()
 
@@ -739,44 +684,45 @@ if suggestions:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-pending = st.session_state.pop("pending_question", None)
-
+pending    = st.session_state.pop("pending_question", None)
 user_input = st.chat_input("💬 Ask A Question...") or pending
 
 if user_input:
     st.chat_message("human").write(user_input)
 
-    history_text = ""
-    for message in history.messages:
-        role = "User" if getattr(message, "type", "") == "human" else "Assistant"
-        history_text += f"{role}: {message.content}\n"
+    past_messages = history.messages  
 
-    contextualization_prompt = f"""{context_prompt}
+    llm = get_llm()
 
-Conversation History:
-{history_text}
-Latest User Message: {user_input}
-"""
-    llm              = get_llm()
-    rewritten        = llm.invoke(contextualization_prompt)
+    context_chain = Context_Prompt | llm
+    rewritten      = context_chain.invoke({
+        "chat_history": past_messages,
+        "input": user_input
+    })
     standalone_query = rewritten.content.strip().strip('"')
 
     retrieved_docs = retreiver.invoke(standalone_query)
-    context        = _join_docs(retrieved_docs)
 
-    top_doc     = retrieved_docs[0] if retrieved_docs else None
-    file_name   = top_doc.metadata.get("source_file", "Unknown") if top_doc else "Unknown"
-    page_number = top_doc.metadata.get("page", "N/A") if top_doc else "N/A"
+    def build_context(docs):
+        parts = []
+        for doc in docs:
+            file_name = doc.metadata.get("source_file", "Unknown")
+            file_type = doc.metadata.get("type", "UNKNOWN")      
+            page_num  = doc.metadata.get("page", "N/A")
+            parts.append(
+                f"(File: {file_name} | Type: {file_type} | Page: {page_num})\n"
+                f"{doc.page_content}"
+            )
+        return "\n\n".join(parts)
 
-    final_prompt = qa_prompt.format(
-        context=context,
-        question=standalone_query,
-        file_name=file_name,
-        page_number=page_number
-    )
+    context = build_context(retrieved_docs)
 
-    response = llm.invoke(final_prompt)
-    answer   = response.content
+    qa_chain = qa_prompt | llm
+    response = qa_chain.invoke({
+        "context": context,
+        "input":   standalone_query
+    })
+    answer = response.content
 
     history.add_user_message(user_input)
     history.add_ai_message(answer)
@@ -798,9 +744,10 @@ Latest User Message: {user_input}
 
     with st.expander("📄 Retrieved Chunks"):
         for i, doc in enumerate(retrieved_docs):
-            src = doc.metadata.get("source_file", "Unknown")
-            pg  = doc.metadata.get("page", "N/A")
-            st.markdown(f"**Chunk {i+1}** | 📄 `{src}` | Page `{pg}`")
+            src  = doc.metadata.get("source_file", "Unknown")
+            pg   = doc.metadata.get("page", "N/A")
+            ftype = doc.metadata.get("type", "UNKNOWN")
+            st.markdown(f"**Chunk {i+1}** | 📄 `{src}` | Type `{ftype}` | Page `{pg}`")
             st.text(doc.page_content[:500])
             st.divider()
 
@@ -810,5 +757,5 @@ with st.sidebar:
     if st.button("🧹 Clear Chat"):
         st.session_state.pop("chat_history", None)
         st.session_state["suggested_questions"] = []
-        st.session_state["pending_question"] = None
+        st.session_state["pending_question"]    = None
         st.rerun()
